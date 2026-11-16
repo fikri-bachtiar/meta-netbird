@@ -1,0 +1,17 @@
+[Unit]
+Description=NetBird client (daemon and automatic connect)
+Documentation=https://docs.netbird.io
+# Not network-online.target: its wait-online service can hold the start for
+# up to 2 min (e.g. Wi-Fi not joined yet). netbird-autostart retries
+# "netbird up" until the network is there, so starting early is safe.
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/netbird-autostart
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

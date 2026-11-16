@@ -1,0 +1,90 @@
+#!/bin/sh
+# NetBird daemon + automatic connect. Installed by the meta-netbird Yocto layer.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+
+NETBIRD=/usr/bin/netbird
+CONF=/etc/netbird/autostart.env
+
+# Settings are NB_* variables; netbird reads them as command line flags.
+if [ -r "$CONF" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$CONF"
+    set +a
+fi
+
+log() {
+    echo "netbird-autostart: $*"
+}
+
+mkdir -p /var/log/netbird /var/lib/netbird 2>/dev/null
+
+"$NETBIRD" service run &
+DAEMON=$!
+
+stop() {
+    [ -n "$ENROL" ] && kill "$ENROL" 2>/dev/null
+    kill -TERM "$DAEMON" 2>/dev/null
+    wait "$DAEMON" 2>/dev/null
+    exit 0
+}
+trap stop TERM INT
+
+# "netbird up" until it succeeds; retry with a growing pause (no network yet,
+# 4G not up, ...). Returns 1 only when the daemon is gone.
+up_with_retry() {
+    delay=15
+    while kill -0 "$DAEMON" 2>/dev/null; do
+        if out=$("$NETBIRD" up 2>&1); then
+            log "connected"
+            return 0
+        fi
+        log "netbird up failed, next try in ${delay}s: $out"
+        sleep "$delay"
+        delay=$((delay * 2))
+        [ "$delay" -gt 120 ] && delay=120
+    done
+    return 1
+}
+
+connect() {
+    # 1. wait for the daemon to answer on its socket
+    n=0
+    until "$NETBIRD" status --check live >/dev/null 2>&1; do
+        n=$((n + 1))
+        if [ "$n" -ge 120 ]; then
+            log "daemon did not answer after 120 s, still trying to connect"
+            break
+        fi
+        sleep 1
+    done
+
+    # 2. connect
+    up_with_retry || return
+
+    # 3. watch. After a network loss (Wi-Fi gone and back) the daemon can drop
+    #    into NeedsLogin / LoginFailed and then waits for "netbird up" forever.
+    #    It stays alive, so systemd will not restart it: log in again here.
+    #    ("netbird down" leaves Idle, which is not touched.)
+    while kill -0 "$DAEMON" 2>/dev/null; do
+        sleep 30
+        st=$("$NETBIRD" status 2>/dev/null | sed -n 's/^Daemon status: *//p' | head -n 1)
+        case "$st" in
+            NeedsLogin|LoginFailed|SessionExpired)
+                log "daemon is in $st, logging in again"
+                up_with_retry || return
+                ;;
+        esac
+    done
+}
+
+connect &
+ENROL=$!
+
+wait "$DAEMON"
+rc=$?
+kill "$ENROL" 2>/dev/null
+log "daemon exited with status $rc"
+exit "$rc"
